@@ -1,0 +1,31 @@
+version: '3.8' # You can remove this line as per the warning, but it's not the error source
+
+services:
+  db:
+    image: postgres:13
+    restart: always
+    environment:
+      POSTGRES_DB: kifiya_db
+      POSTGRES_USER: kifiya_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data # This 'db_data' refers to the named volume below
+    ports:
+      - "5432:5432" # Or "5433:5432" if you changed it earlier due to port conflict
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      DATABASE_URL: postgresql://kifiya_user:${DB_PASSWORD}@db:5432/kifiya_db
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+    depends_on:
+      - db
+    # command: python main.py # Uncomment this later
+
+volumes: # THIS SECTION MUST BE AT THE SAME INDENTATION LEVEL AS 'services:'
+  db_data: # This defines the named volume 'db_data'
