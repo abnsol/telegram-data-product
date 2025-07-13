@@ -25,7 +25,7 @@ services:
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
     depends_on:
       - db
-    # command: python main.py # Uncomment this later
+    command: uvicorn fastapi_app.main:app --host 0.0.0.0 --port 8000 
 
 volumes: # THIS SECTION MUST BE AT THE SAME INDENTATION LEVEL AS 'services:'
   db_data: # This defines the named volume 'db_data'
