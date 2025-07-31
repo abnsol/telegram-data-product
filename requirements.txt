@@ -1,9 +1,3 @@
 telethon
-dbt-postgres
-ultralytics
-fastapi
-uvicorn
-dagster
-dagster-webserver
-python-dotenv
-psycopg2-binary
+python-dotenv 
+pandas
