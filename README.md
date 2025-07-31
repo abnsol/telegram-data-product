@@ -4,21 +4,6 @@ A robust solution for extracting, storing, and transforming public Telegram chan
 
 ---
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Key Features](#key-features)
-- [System Design](#system-design)
-- [Directory Layout](#directory-layout)
-- [Setup Guide](#setup-guide)
-- [Pipeline Execution](#pipeline-execution)
-- [Data Organization](#data-organization)
-- [FAQ & Troubleshooting](#faq--troubleshooting)
-- [How to Contribute](#how-to-contribute)
-- [License & Support](#license--support)
-
----
-
 ## Overview
 
 This project implements an ELT pipeline to generate insights from Telegram health discussions:
