@@ -3,3 +3,6 @@ python-dotenv
 pandas
 psycopg2-binary
 dbt-postgres
+ultralytics
+fastapi
+uvicorn[standard]
