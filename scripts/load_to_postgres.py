@@ -1,68 +1,59 @@
 import os
 import json
 import psycopg2
-import datetime
 import logging
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
+# --- Configuration ---
 POSTGRES_DB = os.getenv("POSTGRES_DB")
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT")
 
-RAW_DATA_LAKE_MESSAGES_DIR = 'data/raw/telegram_messages'
+YOLO_DETECTIONS_FILE = 'data/processed/yolo_detections.jsonl'
 
+# Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     handlers=[
-                        logging.FileHandler('data/raw_loader.log'),
+                        logging.FileHandler('data/yolo_loader.log'),
                         logging.StreamHandler()
                     ])
 logger = logging.getLogger(__name__)
 
-def create_raw_table(cursor):
+def create_raw_yolo_table(cursor):
+    """Creates the raw.raw_yolo_detections table if it doesn't exist."""
     create_table_sql = """
     CREATE SCHEMA IF NOT EXISTS raw;
-    CREATE TABLE IF NOT EXISTS raw.raw_telegram_messages (
+    CREATE TABLE IF NOT EXISTS raw.raw_yolo_detections (
         id SERIAL PRIMARY KEY,
-        message_id BIGINT UNIQUE NOT NULL,
-        channel_username TEXT,
-        channel_title TEXT,
+        message_id BIGINT NOT NULL,
+        image_path TEXT NOT NULL,
         scraped_date DATE NOT NULL,
-        raw_json JSONB NOT NULL,
+        channel_name TEXT,
+        detected_object_class TEXT NOT NULL,
+        confidence_score NUMERIC(5, 4) NOT NULL,
+        detection_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+        raw_detection_json JSONB NOT NULL,
         loaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     );
-    CREATE INDEX IF NOT EXISTS idx_raw_telegram_messages_message_id ON raw.raw_telegram_messages (message_id);
-    CREATE INDEX IF NOT EXISTS idx_raw_telegram_messages_scraped_date ON raw.raw_telegram_messages (scraped_date);
+    CREATE INDEX IF NOT EXISTS idx_raw_yolo_detections_message_id ON raw.raw_yolo_detections (message_id);
+    CREATE INDEX IF NOT EXISTS idx_raw_yolo_detections_object_class ON raw.raw_yolo_detections (detected_object_class);
     """
     try:
         cursor.execute(create_table_sql)
-        logger.info("Raw table 'raw.raw_telegram_messages' ensured to exist.")
+        logger.info("Raw table 'raw.raw_yolo_detections' ensured to exist.")
     except Exception as e:
-        logger.error(f"Error creating raw table: {e}", exc_info=True)
+        logger.error(f"Error creating raw YOLO table: {e}", exc_info=True)
         raise
 
-class CustomEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, datetime.datetime):
-            return obj.isoformat()
-        elif isinstance(obj, bytes):
-            try:
-                return obj.decode('utf-8')
-            except UnicodeDecodeError:
-                return str(obj)
-        elif hasattr(obj, 'to_dict'):
-            return obj.to_dict()
-        elif hasattr(obj, '__dict__'):
-            return obj.__dict__
-        return json.JSONEncoder.default(self, obj)
-
-def load_json_to_postgres():
+def load_yolo_detections_to_postgres():
     """
-    Loads JSON files from the data lake into the PostgreSQL raw.raw_telegram_messages table.
+    Loads YOLO detection records from JSONL file into PostgreSQL.
     """
     conn = None
     try:
@@ -75,89 +66,78 @@ def load_json_to_postgres():
         )
         cursor = conn.cursor()
 
-        create_raw_table(cursor)
+        create_raw_yolo_table(cursor)
 
-        total_files_processed = 0
-        total_messages_loaded = 0
+        total_detections_loaded = 0
         
-        for date_dir in os.listdir(RAW_DATA_LAKE_MESSAGES_DIR):
-            full_date_dir_path = os.path.join(RAW_DATA_LAKE_MESSAGES_DIR, date_dir)
-            if not os.path.isdir(full_date_dir_path):
-                continue
+        if not os.path.exists(YOLO_DETECTIONS_FILE):
+            logger.info(f"No YOLO detections file found at {YOLO_DETECTIONS_FILE}. Skipping load.")
+            return
+
+        with open(YOLO_DETECTIONS_FILE, 'r', encoding='utf-8') as f:
+            detections_to_insert = []
+            for line_num, line in enumerate(f):
+                try:
+                    record = json.loads(line.strip())
+                    
+                    # Basic validation and type conversion
+                    message_id = record.get('message_id')
+                    image_path = record.get('image_path')
+                    scraped_date = record.get('scraped_date')
+                    channel_name = record.get('channel_name')
+                    detected_object_class = record.get('detected_object_class')
+                    confidence_score = record.get('confidence_score')
+                    detection_timestamp = record.get('timestamp')
+
+                    if not all([message_id, image_path, detected_object_class, confidence_score, detection_timestamp]):
+                        logger.warning(f"Skipping malformed record on line {line_num + 1} in {YOLO_DETECTIONS_FILE}: Missing required fields. Record: {line.strip()}")
+                        continue
+                    
+                    detections_to_insert.append((
+                        message_id,
+                        image_path,
+                        scraped_date,
+                        channel_name,
+                        detected_object_class,
+                        confidence_score,
+                        detection_timestamp,
+                        json.dumps(record) # Store full raw detection as JSONB
+                    ))
+
+                    if len(detections_to_insert) >= 100: # Batch insert for efficiency
+                        insert_sql = """
+                        INSERT INTO raw.raw_yolo_detections (message_id, image_path, scraped_date, channel_name, detected_object_class, confidence_score, detection_timestamp, raw_detection_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb);
+                        """
+                        cursor.executemany(insert_sql, detections_to_insert)
+                        conn.commit()
+                        total_detections_loaded += cursor.rowcount
+                        logger.info(f"Loaded {total_detections_loaded} YOLO detections so far...")
+                        detections_to_insert = [] # Reset batch
+
+                except json.JSONDecodeError as jde:
+                    logger.error(f"Error decoding JSON on line {line_num + 1} in {YOLO_DETECTIONS_FILE}: {jde}. Line: {line.strip()}", exc_info=True)
+                except Exception as e:
+                    logger.error(f"Error processing record on line {line_num + 1} in {YOLO_DETECTIONS_FILE}: {e}. Line: {line.strip()}", exc_info=True)
             
-            scraped_date_str = os.path.basename(date_dir)
-            try:
-                scraped_date = datetime.datetime.strptime(scraped_date_str, '%Y-%m-%d').date()
-            except ValueError:
-                logger.warning(f"Skipping directory {date_dir}: Invalid date format.")
-                continue
+            # Insert any remaining records
+            if detections_to_insert:
+                insert_sql = """
+                INSERT INTO raw.raw_yolo_detections (message_id, image_path, scraped_date, channel_name, detected_object_class, confidence_score, detection_timestamp, raw_detection_json)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb);
+                """
+                cursor.executemany(insert_sql, detections_to_insert)
+                conn.commit()
+                total_detections_loaded += cursor.rowcount
 
-            for channel_dir in os.listdir(full_date_dir_path):
-                full_channel_dir_path = os.path.join(full_date_dir_path, channel_dir)
-                if not os.path.isdir(full_channel_dir_path):
-                    continue
-
-                messages_to_insert = []
-
-                for filename in os.listdir(full_channel_dir_path):
-                    if filename.endswith('.json'):
-                        file_path = os.path.join(full_channel_dir_path, filename)
-                        total_files_processed += 1
-                        
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                raw_message_data = json.load(f)
-
-                            message_id = raw_message_data.get('id')
-                            channel_username = raw_message_data.get('channel_username')
-                            channel_title = raw_message_data.get('channel_title')
-                            
-                            if message_id is None:
-                                logger.warning(f"Skipping file {file_path}: 'id' not found in JSON.")
-                                continue
-
-                            messages_to_insert.append((
-                                message_id,
-                                channel_username,
-                                channel_title,
-                                scraped_date,
-                                json.dumps(raw_message_data, cls=CustomEncoder)
-                            ))
-
-                        except json.JSONDecodeError as jde:
-                            logger.error(f"Error decoding JSON from {file_path}: {jde}", exc_info=True)
-                        except Exception as e:
-                            logger.error(f"Error reading/parsing file {file_path}: {e}", exc_info=True)
-
-                if messages_to_insert:
-                    insert_sql = """
-                    INSERT INTO raw.raw_telegram_messages (message_id, channel_username, channel_title, scraped_date, raw_json)
-                    VALUES (%s, %s, %s, %s, %s::jsonb)
-                    ON CONFLICT (message_id) DO NOTHING;
-                    """
-                    try:
-                        cursor.executemany(insert_sql, messages_to_insert)
-                        conn.commit() 
-                        total_messages_loaded += cursor.rowcount 
-                        logger.info(f"Loaded {cursor.rowcount} new messages from channel '{channel_dir}' in date '{date_dir}'. Total loaded: {total_messages_loaded}")
-                    except psycopg2.errors.UniqueViolation as uv:
-                         logger.warning(f"Unique violation during batch insert for channel '{channel_dir}' on {date_dir}. Some messages might be duplicates. {uv}", exc_info=True)
-                         conn.rollback() 
-                    except psycopg2.Error as pg_err:
-                        logger.error(f"PostgreSQL batch insert error for channel '{channel_dir}' on {date_dir}: {pg_err}", exc_info=True)
-                        conn.rollback()
-                    except Exception as e:
-                        logger.error(f"An unexpected error during batch insert for channel '{channel_dir}' on {date_dir}: {e}", exc_info=True)
-                        conn.rollback()
-
-        logger.info(f"Successfully processed {total_files_processed} files. Loaded {total_messages_loaded} total new messages into PostgreSQL.")
+        logger.info(f"Successfully loaded {total_detections_loaded} YOLO detections into PostgreSQL.")
 
     except psycopg2.Error as pg_err:
-        logger.error(f"PostgreSQL connection or initial table creation error: {pg_err}", exc_info=True)
+        logger.error(f"PostgreSQL connection or query error: {pg_err}", exc_info=True)
         if conn:
             conn.rollback()
     except Exception as e:
-        logger.error(f"An unexpected error occurred during overall process: {e}", exc_info=True)
+        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         if conn:
             conn.rollback()
     finally:
@@ -171,4 +151,4 @@ if __name__ == '__main__':
         logger.error("PostgreSQL environment variables not fully set. Please check your .env file.")
         exit(1)
     
-    load_json_to_postgres()
+    load_yolo_detections_to_postgres()
