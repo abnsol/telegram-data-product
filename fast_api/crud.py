@@ -5,6 +5,7 @@ from datetime import date
 from api.database import get_db_connection
 import logging
 
+
 logger = logging.getLogger(__name__)
 
 # --- Helper function to fetch data ---
